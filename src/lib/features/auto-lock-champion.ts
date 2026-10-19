@@ -1,10 +1,11 @@
 import { logger } from '@/index'
 import { store } from '@/lib/store'
-import { lcu, LcuEventUri } from '@/lib/lcu'
-import type { LCUEventMessage, GameflowPhase, ChampSelectSession } from '@/lib/lcu'
+import { lcu } from '@/lib/lcu'
+import type { ChampSelectSession } from '@/lib/lcu'
 import { sleep } from '@/lib/utils'
 import { getChampionById, getQueue } from '@/lib/assets'
 import { translate } from '@/i18n'
+import { sonaAutoPickRun, sonaAutoPickActive, sonaAutoPickRequest, sonaWatchPriorityBench, updateAutoPick } from '@/lib/custom/auto-pick'
 
 // ==================== 秒抢英雄 ====================
 
@@ -142,12 +143,11 @@ async function resolveTargetChampionId(session: ChampSelectSession, actionChampi
 
 /**
  * 监听英雄选择的 actions 变化，当轮到自己的 pick action 处于 isInProgress 时秒锁
- * 仅在有 pick 动作的模式生效（排位/匹配等），大乱斗等无 pick 的模式不受影响
+ * 普通选人沿用 pick action；有备选席或初始卡片的模式交给大乱斗模块。
  */
-async function tryAutoLockChampion() {
+export async function tryAutoLockChampion(run = sonaAutoPickRun) {
   if (getConfiguredChampionIds().length === 0) {
     logger.warn('[AutoLock] 未设置目标英雄队列')
-    return
   }
 
   let lastPreselectedChampionId = 0
@@ -156,7 +156,13 @@ async function tryAutoLockChampion() {
   // 排位赛 BP 可能长达 5 分钟，300 次 × 1s 轮询足够覆盖
   for (let attempt = 0; attempt < 300; attempt++) {
     try {
+      if (!sonaAutoPickActive(run)) return
       const session = await lcu.getChampSelectSession()
+      if (!sonaAutoPickActive(run)) return
+      if (session.benchEnabled || session.allowSubsetChampionPicks) {
+        await sonaWatchPriorityBench(run, session)
+        return
+      }
 
       // 排位补位时，实际分路不在玩家本来的选择内，继续执行预选或秒锁容易
       // 锁下不适合该位置的英雄。LCU 会在本地玩家条目上直接标记 isAutofilled。
@@ -202,6 +208,7 @@ async function tryAutoLockChampion() {
 
       if (session.timer.phase === 'PLANNING') {
         const championId = await resolveTargetChampionId(session, myPickAction.championId)
+        if (!sonaAutoPickActive(run)) return
         if (!championId) {
           await sleep(1000)
           continue
@@ -212,7 +219,7 @@ async function tryAutoLockChampion() {
 
         if (lastPreselectedChampionId !== championId && !alreadyPreselected) {
           const actionUrl = `/lol-champ-select/v1/session/actions/${myPickAction.id}`
-          const patchRes = await fetch(actionUrl, {
+          const patchRes = await sonaAutoPickRequest(run, actionUrl, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ championId }),
@@ -232,6 +239,7 @@ async function tryAutoLockChampion() {
 
       if (myPickAction.isInProgress) {
         const championId = await resolveTargetChampionId(session, myPickAction.championId)
+        if (!sonaAutoPickActive(run)) return
         if (!championId) {
           logger.warn('[AutoLock] 目标英雄队列中没有当前可选英雄')
           return
@@ -244,7 +252,7 @@ async function tryAutoLockChampion() {
           logger.info('[AutoLock] 真正轮到选人了！秒锁英雄 ID: %d (actionId: %d)', championId, myPickAction.id)
 
           // 方案：PATCH 带 completed:true 一步到位完成选择+锁定
-          const patchRes = await fetch(actionUrl, {
+          const patchRes = await sonaAutoPickRequest(run, actionUrl, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -263,13 +271,13 @@ async function tryAutoLockChampion() {
           } else {
             // 备用方案：先 PATCH 选择，再 POST /select 锁定
             logger.warn('[AutoLock] PATCH 方案失败，尝试备用方案 /select')
-            await fetch(actionUrl, {
+            await sonaAutoPickRequest(run, actionUrl, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ championId }),
             })
             await sleep(200)
-            const selectRes = await fetch(`${actionUrl}/select`, { method: 'POST' })
+            const selectRes = await sonaAutoPickRequest(run, `${actionUrl}/select`, { method: 'POST' })
             if (selectRes.ok) {
               logger.info('[AutoLock] 秒锁成功 (select 备用) ✓')
               notifyAutoLockSuccess(championId, true)
@@ -279,7 +287,7 @@ async function tryAutoLockChampion() {
           }
         } else {
           logger.info('[AutoLock] 轮到选人，预选英雄 ID: %d（不锁定）', championId)
-          await fetch(actionUrl, {
+          await sonaAutoPickRequest(run, actionUrl, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ championId }),
@@ -302,20 +310,6 @@ async function tryAutoLockChampion() {
   logger.warn('[AutoLock] 等待超时 (5分钟)，未能秒锁')
 }
 
-let autoLockChampionUnsub: (() => void) | null = null
-
 export function updateAutoLockChampion(enabled: boolean) {
-  if (enabled && !autoLockChampionUnsub) {
-    autoLockChampionUnsub = lcu.observe(LcuEventUri.GAMEFLOW_PHASE_CHANGE, (event: LCUEventMessage) => {
-      const phase = event.data as GameflowPhase
-      if (phase === 'ChampSelect') {
-        tryAutoLockChampion()
-      }
-    })
-    logger.info('Auto lock champion enabled ✓')
-  } else if (!enabled && autoLockChampionUnsub) {
-    autoLockChampionUnsub()
-    autoLockChampionUnsub = null
-    logger.info('Auto lock champion disabled')
-  }
+  updateAutoPick(enabled, tryAutoLockChampion)
 }

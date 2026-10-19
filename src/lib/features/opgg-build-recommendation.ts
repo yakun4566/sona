@@ -781,7 +781,7 @@ function getContextModeLabel(context: RecommendationContext): string {
 }
 
 function getSmartRunePageName(context: RecommendationContext): string {
-  return `${getChampionName(context.championId)} ${getModeLabel(resolveOpggMode(context), context)} - Sona`
+  return `${getChampionName(context.championId)} ${getModeLabel(resolveOpggMode(context), context)}`
 }
 
 function createManagedItemSet(context: RecommendationContext, recommendation: BuildRecommendation): ItemSet | null {

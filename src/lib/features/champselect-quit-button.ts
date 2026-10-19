@@ -183,7 +183,8 @@ function tryInjectQuitButton(): boolean {
 
   const btn = buildSonaQuitButton()
   // 插到容器最前面，视觉上靠左——和原生 quit-button 位置一致
-  container.insertBefore(btn, container.firstChild)
+  const pause = container.querySelector('[data-sona-auto-pick-pause]')
+  container.insertBefore(btn, pause ? pause.nextSibling : container.firstChild)
   logger.info('[QuitButton] 已注入选人阶段退出按钮 ✓')
   return true
 }

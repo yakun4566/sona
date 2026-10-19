@@ -11,6 +11,7 @@ import { logger } from '@/index'
 import { store } from '@/lib/store'
 import { useI18n } from '@/i18n'
 import '@/styles/SettingsPage.css'
+import { AutoPickQueue } from '@/components/ui/AutoPickQueue'
 
 function BackupManager() {
   const { t } = useI18n()
@@ -182,12 +183,6 @@ export function ToolsPage() {
   const [rankDivision, setRankDivision] = useState(store.get('rankDivision'))
   const [autoHonor, setAutoHonor] = useState(store.get('autoHonor'))
   const [autoLockChampion, setAutoLockChampion] = useState(store.get('autoLockChampion'))
-  const [autoLockChampionIds, setAutoLockChampionIds] = useState(store.get('autoLockChampionIds'))
-  const [champSearchText, setChampSearchText] = useState('')
-  const [champSuggestions, setChampSuggestions] = useState<ChampionInfo[]>([])
-  const [showChampSuggestions, setShowChampSuggestions] = useState(false)
-  const [autoLockInstant, setAutoLockInstant] = useState(store.get('autoLockInstant'))
-  const champSuggestRef = useRef<HTMLDivElement>(null)
   const [autoBanChampion, setAutoBanChampion] = useState(store.get('autoBanChampion'))
   const [autoBanChampionIds, setAutoBanChampionIds] = useState(store.get('autoBanChampionIds'))
   const [banChampSearchText, setBanChampSearchText] = useState('')
@@ -259,7 +254,6 @@ export function ToolsPage() {
       store.onChange('customBanner', setCustomBanner),
       store.onChange('autoHonor', setAutoHonor),
       store.onChange('autoLockChampion', setAutoLockChampion),
-      store.onChange('autoLockChampionIds', setAutoLockChampionIds),
       store.onChange('autoBanChampion', setAutoBanChampion),
       store.onChange('autoBanChampionIds', setAutoBanChampionIds),
       store.onChange('rankQueue', setRankQueue),
@@ -287,9 +281,6 @@ export function ToolsPage() {
   // 点击外部关闭英雄联想下拉
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (champSuggestRef.current && !champSuggestRef.current.contains(e.target as Node)) {
-        setShowChampSuggestions(false)
-      }
       if (banChampSuggestRef.current && !banChampSuggestRef.current.contains(e.target as Node)) {
         setShowBanChampSuggestions(false)
       }
@@ -330,27 +321,6 @@ export function ToolsPage() {
     } catch {
       setSearchError(t('tools.matchQuery.failed'))
     }
-  }
-
-  const addAutoLockChampion = (champion: ChampionInfo) => {
-    if (autoLockChampionIds.includes(champion.id)) {
-      setChampSearchText('')
-      setShowChampSuggestions(false)
-      return
-    }
-
-    const next = [...autoLockChampionIds, champion.id]
-    setAutoLockChampionIds(next)
-    store.set('autoLockChampionIds', next)
-    setChampSearchText('')
-    setShowChampSuggestions(false)
-    logger.info('[AutoLock] 已加入目标英雄队列: %s %s (ID: %d)', champion.title, champion.name, champion.id)
-  }
-
-  const removeAutoLockChampion = (championId: number) => {
-    const next = autoLockChampionIds.filter((id) => id !== championId)
-    setAutoLockChampionIds(next)
-    store.set('autoLockChampionIds', next)
   }
 
   const addAutoBanChampion = (champion: ChampionInfo) => {
@@ -657,57 +627,7 @@ export function ToolsPage() {
             onChange={(v) => { setAutoLockChampion(v); store.set('autoLockChampion', v) }}
           />
         </SettingCard>
-        {autoLockChampion && (
-          <div style={{ padding: '0 12px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div className="sona-debug-actions" style={{ alignItems: 'flex-start', gap: 8 }}>
-              <div style={{ flex: 1, position: 'relative' }} ref={champSuggestRef}>
-                <SonaInput
-                  value={champSearchText}
-                  onChange={(v) => {
-                    setChampSearchText(v)
-                    const results = searchChampions(v)
-                    setChampSuggestions(results)
-                    setShowChampSuggestions(results.length > 0)
-                  }}
-                  placeholder={t('tools.autoLock.searchPlaceholder')}
-                />
-                {showChampSuggestions && champSuggestions.length > 0 && (
-                  <div className="sona-champ-suggest">
-                    {champSuggestions.map((c) => (
-                      <button
-                        key={c.id}
-                        className="sona-champ-suggest-item"
-                        type="button"
-                        onClick={() => addAutoLockChampion(c)}
-                      >
-                        <img className="sona-champ-suggest-icon" src={`/lol-game-data/assets/v1/champion-icons/${c.id}.png`} alt="" />
-                        <span className="sona-champ-suggest-title">{c.title}</span>
-                        <span className="sona-champ-suggest-name">{c.name}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <SonaButton
-                variant={autoLockInstant ? 'primary' : undefined}
-                onClick={() => { setAutoLockInstant(true); store.set('autoLockInstant', true) }}
-              >
-                {t('tools.autoLock.lock')}{autoLockInstant ? ' ✓' : ''}
-              </SonaButton>
-              <SonaButton
-                variant={!autoLockInstant ? 'primary' : undefined}
-                onClick={() => { setAutoLockInstant(false); store.set('autoLockInstant', false) }}
-              >
-                {t('tools.autoLock.preselect')}{!autoLockInstant ? ' ✓' : ''}
-              </SonaButton>
-            </div>
-            <ChampionPriorityCards
-              championIds={autoLockChampionIds}
-              emptyText={t('tools.autoLock.empty')}
-              onRemove={removeAutoLockChampion}
-            />
-          </div>
-        )}
+        {autoLockChampion && <AutoPickQueue />}
         <SettingCard
           title={t('tools.autoBan.title')}
           description={t('tools.autoBan.description')}

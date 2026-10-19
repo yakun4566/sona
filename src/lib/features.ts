@@ -51,12 +51,13 @@ import {
 } from '@/lib/player-strength-score'
 import { deobfuscateChampSelectPuuid } from '@/lib/champ-select-puuid'
 import { translate } from '@/i18n'
+import { createManualAnalysis } from '@/lib/custom/manual-analysis'
 
 // ==================== 共享：查询队友胜率 ====================
 
 type ChampSelectTeamPlayer = ChampSelectSession['myTeam'][number]
 
-interface TeammateStats {
+export interface TeammateStats {
   floor: number
   summonerId: number
   puuid: string
@@ -74,7 +75,7 @@ interface TeammateStats {
   strengthScore: SonaPlayerStrengthScore | null
 }
 
-interface TeamStatsResult {
+export interface TeamStatsResult {
   isBlue: boolean
   stats: TeammateStats[]
   queueId: number
@@ -102,7 +103,7 @@ function getTeammateStatsKey(stat: TeammateStats): string {
  * 正常模式直接使用 puuid；匿名模式则还原 obfuscatedPuuid。
  * 只处理 HIDDEN，避免未来客户端引入其他可见性类型时误判。
  */
-function resolveChampSelectPuuid(player: ChampSelectTeamPlayer): string {
+function resolveChampSelectPuuid(player: TeamStatsPlayer): string {
   if (player.puuid) return player.puuid
   if (player.nameVisibilityType !== 'HIDDEN' || !player.obfuscatedPuuid) return ''
   return deobfuscateChampSelectPuuid(player.obfuscatedPuuid)
@@ -110,6 +111,7 @@ function resolveChampSelectPuuid(player: ChampSelectTeamPlayer): string {
 
 /** 去重：同一个 ChampSelect 阶段多个功能需要同一份数据时，复用同一轮请求 */
 let _fetchTeamStatsPromise: Promise<TeamStatsResult> | null = null
+let _fetchTeamStatsKey = ''
 
 /**
  * 查询当前选人阶段所有队友的近期战绩
@@ -119,18 +121,30 @@ let _fetchTeamStatsPromise: Promise<TeamStatsResult> | null = null
  * 多次并发调用会复用同一轮请求（promise 去重）
  */
 async function fetchTeamStats(): Promise<TeamStatsResult> {
-  if (_fetchTeamStatsPromise) return _fetchTeamStatsPromise
+  const session = await lcu.getChampSelectSession()
+  const key = JSON.stringify([session.gameId, session.chatDetails?.multiUserChatId, session.queueId,
+    session.myTeam.map(getPlayerStatsKey)])
+  if (_fetchTeamStatsPromise && _fetchTeamStatsKey === key) return _fetchTeamStatsPromise
 
-  _fetchTeamStatsPromise = _doFetchTeamStats()
+  _fetchTeamStatsKey = key
+  const pending = _doFetchTeamStats(session)
+  _fetchTeamStatsPromise = pending
   try {
-    return await _fetchTeamStatsPromise
+    return await pending
   } finally {
-    _fetchTeamStatsPromise = null
+    if (_fetchTeamStatsPromise === pending) _fetchTeamStatsPromise = null
   }
 }
 
-async function _doFetchTeamStats(): Promise<TeamStatsResult> {
-  const session = await lcu.getChampSelectSession()
+type TeamStatsPlayer = Pick<ChampSelectTeamPlayer, 'puuid' | 'cellId'> & Partial<ChampSelectTeamPlayer>
+export interface TeamStatsSession {
+  myTeam: TeamStatsPlayer[]
+  localPlayerCellId: number
+  queueId: number
+}
+
+async function _doFetchTeamStats(sessionOverride?: TeamStatsSession): Promise<TeamStatsResult> {
+  const session = sessionOverride ?? await lcu.getChampSelectSession()
   const localPlayer = session.myTeam.find((p) => p.cellId === session.localPlayerCellId)
   const isBlue = localPlayer ? localPlayer.cellId < 5 : true
 
@@ -149,18 +163,18 @@ async function _doFetchTeamStats(): Promise<TeamStatsResult> {
 
   /** 构造占位元素：查询失败时仍保留身份信息，供弹窗标题与换楼匹配使用 */
   const placeholder = (
-    player: ChampSelectTeamPlayer,
+    player: TeamStatsPlayer,
     i: number,
     resolvedPuuid = resolveChampSelectPuuid(player),
     resolvedIdentity?: { summonerId?: number; gameName?: string; tagLine?: string },
   ): TeammateStats => ({
     floor: i + 1,
-    summonerId: resolvedIdentity?.summonerId || player.summonerId,
+    summonerId: resolvedIdentity?.summonerId || player.summonerId || 0,
     puuid: resolvedPuuid,
-    obfuscatedSummonerId: player.obfuscatedSummonerId,
-    obfuscatedPuuid: player.obfuscatedPuuid,
-    gameName: resolvedIdentity?.gameName || player.gameName,
-    tagLine: resolvedIdentity?.tagLine || player.tagLine,
+    obfuscatedSummonerId: player.obfuscatedSummonerId || 0,
+    obfuscatedPuuid: player.obfuscatedPuuid || '',
+    gameName: resolvedIdentity?.gameName || player.gameName || '',
+    tagLine: resolvedIdentity?.tagLine || player.tagLine || '',
     winRate: null,
     wins: 0,
     total: 0,
@@ -529,7 +543,7 @@ function applyHiddenPlayerName(wrapper: Element, stat: TeammateStats, playerKey:
  * 斗魂（Arena）模式所有玩家都在 myTeam（16 人）且夹杂空位占位，
  * 跳过它们避免楼层错位与无意义展示。
  */
-function getAnalyzableTeamPlayers(session: ChampSelectSession): ChampSelectTeamPlayer[] {
+function getAnalyzableTeamPlayers<T extends TeamStatsPlayer>(session: { myTeam: T[] }): T[] {
   return session.myTeam.filter((player) => Boolean(player.puuid) || Boolean(player.obfuscatedPuuid))
 }
 
@@ -911,78 +925,12 @@ function assignTeamPowerTitles(stats: TeammateStats[]): Map<string, string> {
   return titles
 }
 
-async function analyzeTeammates() {
-  try {
-    const { stats, fetchCount } = await fetchTeamStats()
-
-    logger.info('┌─── 队友战绩分析 ───')
-
-    const chatLines: string[] = [translate('champSelect.teamAnalysis.header', { count: fetchCount })]
-    const teamPowerTitles = assignTeamPowerTitles(stats)
-
-    for (const s of stats) {
-      const floor = translate('champSelect.teamAnalysis.floor', { floor: s.floor })
-      if (s.winRate == null) {
-        logger.info('│ %s — %s#%s — 无近期战绩或查询失败', floor, s.gameName, s.tagLine)
-        chatLines.push(translate('champSelect.teamAnalysis.emptyLine', { floor }))
-        continue
-      }
-
-      const winRate = s.winRate.toFixed(1)
-      const kdaStr = s.kdaNum >= 99 ? 'Perfect' : s.kdaNum.toFixed(2)
-      const title = teamPowerTitles.get(getTeammateStatsKey(s)) ?? translate('strength.teamTier.newbie')
-      const scoreText = s.strengthScore ? s.strengthScore.score.toFixed(1) : '--'
-
-      logger.info(
-        '│ %s — %s#%s — 近%d场 胜率: %s%% (%d胜%d负) | KDA: %s (%.1f/%.1f/%.1f) | 综合评分: %s | %s',
-        floor, s.gameName, s.tagLine,
-        s.total, winRate, s.wins, s.total - s.wins,
-        kdaStr, s.avgK, s.avgD, s.avgA, scoreText, title,
-      )
-
-      chatLines.push(translate('champSelect.teamAnalysis.line', { floor, title, winRate, kda: kdaStr, score: scoreText }))
-    }
-
-    logger.info('└────────────────────')
-
-    // 等待聊天室就绪后发送
-    const msg = chatLines.join('\n')
-    const msgType = store.get('analyzeTeamPowerMsgType') || 'celebration'
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
-        await lcu.sendChampSelectMessage(msg, msgType)
-        logger.info('队友分析已发送到聊天框 ✓')
-        break
-      } catch {
-        if (attempt < 9) {
-          await sleep(1000)
-        } else {
-          logger.warn('聊天发送失败，聊天室始终未就绪')
-        }
-      }
-    }
-  } catch (err) {
-    logger.error('队友战绩分析失败:', err)
-  }
-}
-
-let analyzeTeamPowerUnsub: (() => void) | null = null
-
-function updateAnalyzeTeamPower(enabled: boolean) {
-  if (enabled && !analyzeTeamPowerUnsub) {
-    analyzeTeamPowerUnsub = lcu.observe(LcuEventUri.GAMEFLOW_PHASE_CHANGE, (event: LCUEventMessage) => {
-      const phase = event.data as GameflowPhase
-      if (phase === 'ChampSelect') {
-        analyzeTeammates()
-      }
-    })
-    logger.info('Analyze team power enabled ✓')
-  } else if (!enabled && analyzeTeamPowerUnsub) {
-    analyzeTeamPowerUnsub()
-    analyzeTeamPowerUnsub = null
-    logger.info('Analyze team power disabled')
-  }
-}
+const { updateManualAnalysis: updateAnalyzeTeamPower } = createManualAnalysis({
+  fetchTeamStats,
+  queryTeamStats: _doFetchTeamStats,
+  assignTitles: assignTeamPowerTitles,
+  playerKey: getTeammateStatsKey,
+})
 
 // ==================== 选人阶段红蓝方提示 ====================
 

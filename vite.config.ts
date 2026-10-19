@@ -142,6 +142,9 @@ function penguBuild(): Plugin {
         fs.writeFileSync(cssPath, css)
       }
 
+      // Fork validation builds stay inside dist; normal Pengu development keeps its existing target.
+      if (process.env.SONA_BUILD_ONLY === '1') return
+
       // Copy build output to plugins directory (skip if it's the project root)
       const projectRoot = path.resolve(__dirname)
       if (path.resolve(PLUGINS_DIR) === projectRoot) {

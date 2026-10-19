@@ -521,7 +521,7 @@ function RuneSection({ title, runes, championName, modeLabel }: { title: string;
     setApplyErrorKey('')
 
     try {
-      const pageName = `${championName} ${modeLabel} - Sona`
+      const pageName = `${championName} ${modeLabel}`
       await lcu.applyRunePage({
         name: pageName,
         primaryStyleId: rune.primary_page_id,

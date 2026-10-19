@@ -9,6 +9,7 @@
  * @see https://pengu.lol/runtime-api
  */
 
+import { isManagedRunePage, rememberRunePage } from '@/lib/custom/rune-page-ownership'
 import type {
   SummonerInfo,
   LobbyConfig,
@@ -1723,7 +1724,7 @@ class LCUManager {
     }
     const pages = await this.getRunePages()
     const isEditable = (p: RunePage) => p.isEditable !== false
-    const isSonaManaged = (p: RunePage) => /\s-\s*Sona$/i.test(p.name)
+    const isSonaManaged = isManagedRunePage
     const cleanupDuplicateSonaPages = async (keepId: number) => {
       await Promise.allSettled(
         pages
@@ -1736,22 +1737,22 @@ class LCUManager {
     if (existing) {
       const updated = await this.updateRunePage(existing.id, payload)
       await cleanupDuplicateSonaPages(existing.id)
-      return updated
+      return rememberRunePage(updated)
     }
 
     const managed = pages.find((p) => isSonaManaged(p) && isEditable(p))
     if (managed) {
       const updated = await this.updateRunePage(managed.id, payload)
       await cleanupDuplicateSonaPages(managed.id)
-      return updated
+      return rememberRunePage(updated)
     }
 
     try {
-      return await this.createRunePage(payload)
+      return rememberRunePage(await this.createRunePage(payload))
     } catch (err) {
       const fallback = pages.find((p) => p.current && p.isEditable !== false) ?? pages.find((p) => p.isEditable !== false)
       if (fallback) {
-        return this.updateRunePage(fallback.id, payload)
+        return rememberRunePage(await this.updateRunePage(fallback.id, payload))
       }
       throw err
     }

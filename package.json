@@ -12,6 +12,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:custom": "tsc && node scripts/build-custom.mjs",
+    "test:custom": "node --test tests/aram-priority.test.mjs tests/manual-chat.test.mjs tests/integration.test.mjs",
     "preview": "vite preview",
     "update-balance": "tsx scripts/update-champion-balance.ts"
   },
