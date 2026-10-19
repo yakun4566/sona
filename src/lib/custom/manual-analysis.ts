@@ -1,7 +1,7 @@
 import { logger } from '@/index'
 import { store } from '@/lib/store'
 import { lcu, LcuEventUri } from '@/lib/lcu'
-import type { Lobby, ChatConversation } from '@/types/lcu'
+import type { Lobby, ChatConversation, GameflowSession } from '@/types/lcu'
 import { getChampionById } from '@/lib/assets'
 import { translate } from '@/i18n'
 import { sonaNotify } from './notice'
@@ -17,6 +17,7 @@ export function createManualAnalysis(deps: AnalysisDependencies) {
   let sonaAnalysisCache: {
     text: string
     round: number
+    exported: { player: TeammateStats; text: string }[]
   } | null = null
   let sonaAnalysisPending: Promise<{
     text: string
@@ -33,6 +34,37 @@ export function createManualAnalysis(deps: AnalysisDependencies) {
   }
   function sonaAnalysisPlainTier(tier: string) {
     return tier.replace(/^[^A-Za-z\u3400-\u9fff]+/u, "")
+  }
+  function sonaPremadeLabels(data: GameflowSession['gameData']) {
+    const labels = new Map<string, string>()
+    let nextGroup = 0
+    for (const team of [data.teamOne || [], data.teamTwo || []]) {
+      const groups = new Map<number, typeof team>()
+      for (const player of team) {
+        if (player.nameVisibilityType === 'HIDDEN' || !player.puuid || !(player.teamParticipantId > 0)) continue
+        const group = groups.get(player.teamParticipantId) || []
+        if (!group.some(member => member.puuid === player.puuid)) group.push(player)
+        groups.set(player.teamParticipantId, group)
+      }
+      for (const group of groups.values()) {
+        if (group.length < 2) continue
+        const label = `[开黑${String.fromCharCode(65 + nextGroup++)}队]`
+        for (const player of group) labels.set(player.puuid, label)
+      }
+    }
+    return labels
+  }
+  async function sonaGetAllyAnalysis() {
+    const cache = sonaAnalysisCache
+    if (!cache || !store.get('analyzeTeamPower')) return null
+    const revision = sonaAnalysisRevision
+    const { gameData } = await lcu.getGameflowSession()
+    if (!gameData || cache !== sonaAnalysisCache || revision !== sonaAnalysisRevision) return null
+    const labels = sonaPremadeLabels(gameData)
+    return cache.exported.map(({ player, text }) => {
+      const label = labels.get(player.puuid)
+      return label ? `${label} ${text}` : text
+    }).join('\n')
   }
   async function sonaQueryEnemyAnalysis() {
     if (!store.get("analyzeTeamPower"))
@@ -59,12 +91,13 @@ export function createManualAnalysis(deps: AnalysisDependencies) {
     if (!store.get("analyzeTeamPower") || !allowed(await lcu.getGameflowPhase()) || String((await lcu.getGameflowSession()).gameData?.gameId) !== String(data.gameId))
       throw new Error("对局已结束或更换，已取消敌方查询")
     const ranked = deps.assignTitles(stats)
+    const premades = sonaPremadeLabels(data)
     return players.map((player, index) => {
       const stat = stats.find(item => player.puuid && item.puuid === player.puuid)
       const selection = data.playerChampionSelections?.find(item => item.puuid && item.puuid === player.puuid)
       const champion = getChampionById(player.championId || selection?.championId || 0)
       const name = String(stat?.gameName || player.gameName || player.summonerName || `玩家${index + 1}`).replace(/[\r\n\t]/g, " ")
-      const prefix = `[敌方]${champion ? ` ${champion.name}` : ""} ${name}`
+      const prefix = `[敌方]${premades.get(player.puuid) || ''}${champion ? ` ${champion.name}` : ""} ${name}`
       if (stat?.winRate == null)
         return `${prefix}：暂无有效战绩 / 查询失败`
       const tier = sonaAnalysisPlainTier(ranked.get(deps.playerKey(stat)) || translate("strength.teamTier.newbie"))
@@ -76,35 +109,41 @@ export function createManualAnalysis(deps: AnalysisDependencies) {
     if (!bridge)
       throw new Error("桥接插件尚未就绪")
     const { stats } = await deps.fetchTeamStats()
+    const game = await lcu.getGameflowSession().catch(() => null)
+    const premades = game?.gameData ? sonaPremadeLabels(game.gameData) : new Map<string, string>()
     if (!store.get("analyzeTeamPower") || revision !== sonaAnalysisRevision)
       throw new Error("本次分析已取消")
     logger.info("┌─── 队友战绩分析 ───")
-    const chatLines = [], exported = [], titles = deps.assignTitles(stats)
+    const chatLines: string[] = [], exported: string[] = [], titles = deps.assignTitles(stats)
     for (const player of stats) {
       const floor = translate("champSelect.teamAnalysis.floor", { floor: player.floor })
       const name = String(player.gameName || "").replace(/[\r\n\t]/g, " ").trim()
       const tag = String(player.tagLine || "").replace(/[\r\n\t]/g, " ").trim()
       const label = name ? `${name}${tag ? `#${tag}` : ""} (${floor})` : floor
+      const chatLabel = sonaAnalysisChatLabel(player) + (premades.get(player.puuid) || '')
       if (player.winRate == null) {
         logger.info("│ %s — %s#%s — 无近期战绩或查询失败", label, player.gameName, player.tagLine)
-        chatLines.push(translate("champSelect.teamAnalysis.emptyLine", { floor: sonaAnalysisChatLabel(player) }))
+        chatLines.push(translate("champSelect.teamAnalysis.emptyLine", { floor: chatLabel }))
         exported.push(`${label}：暂无有效战绩 / 查询失败`)
         continue
       }
       const winRate = player.winRate.toFixed(1), kda = player.kdaNum >= 99 ? "Perfect" : player.kdaNum.toFixed(2), title = titles.get(deps.playerKey(player)) ?? translate("strength.teamTier.newbie"), score = player.strengthScore ? player.strengthScore.score.toFixed(1) : "--"
       logger.info("│ %s — %s#%s — 近%d场 胜率: %s%% (%d胜%d负) | KDA: %s (%.1f/%.1f/%.1f) | 综合评分: %s | %s", label, player.gameName, player.tagLine, player.total, winRate, player.wins, player.total - player.wins, kda, player.avgK, player.avgD, player.avgA, score, title)
       const tier = sonaAnalysisPlainTier(title)
-      chatLines.push(translate("champSelect.teamAnalysis.line", { floor: sonaAnalysisChatLabel(player), title: tier, winRate, kda, score }))
+      chatLines.push(translate("champSelect.teamAnalysis.line", { floor: chatLabel, title: tier, winRate, kda, score }))
       exported.push(`${label}：${tier} | 胜率${winRate}% | KDA${kda} | 评分${score}`)
     }
     logger.info("└────────────────────")
     if (!chatLines.length)
       throw new Error("未获取到队友信息，将自动重试。")
     const text = "牛马检测\n" + chatLines.join("\n\n")
-    await bridge.save(exported.join("\n"), round)
+    await bridge.save(exported.map((line, index) => {
+      const label = premades.get(stats[index].puuid)
+      return label ? `${label} ${line}` : line
+    }).join("\n"), round)
     if (!store.get("analyzeTeamPower") || revision !== sonaAnalysisRevision)
       throw new Error("本次分析已取消")
-    sonaAnalysisCache = { text, round }
+    sonaAnalysisCache = { text, round, exported: stats.map((player, index) => ({ player, text: exported[index] })) }
     sonaNotify("分析已自动保存，按 F8 发送")
     return sonaAnalysisCache
   }
@@ -248,7 +287,7 @@ export function createManualAnalysis(deps: AnalysisDependencies) {
           return
         previousPhase = event.data
         sonaAnalysisRevision++
-        sonaAnalysisCache = null
+        if (!["GameStart", "InProgress", "Reconnect"].includes(event.data)) sonaAnalysisCache = null
         sonaAnalysisPending = null
         if (event.data === "ChampSelect")
           void prepare()
@@ -261,12 +300,15 @@ export function createManualAnalysis(deps: AnalysisDependencies) {
         sonaAnalysisPending = null
         if (window.__SONA_QUERY_ENEMIES__ === sonaQueryEnemyAnalysis)
           delete window.__SONA_QUERY_ENEMIES__
+        if (window.__SONA_GET_ALLY_ANALYSIS__ === sonaGetAllyAnalysis)
+          delete window.__SONA_GET_ALLY_ANALYSIS__
         clearInterval(timer)
         document.removeEventListener("keydown", sonaManualAnalysisKey, true)
         sonaAnalysisRevision++
         sonaAnalysisCache = null
       }
       window.__SONA_QUERY_ENEMIES__ = sonaQueryEnemyAnalysis
+      window.__SONA_GET_ALLY_ANALYSIS__ = sonaGetAllyAnalysis
       void prepare()
       logger.info("队友分析已启用：自动保存，选人阶段按 F8 发送")
     }

@@ -17,6 +17,7 @@ export function init(context) {
   let polling = false;
   let lastEnemyRequest = null;
   let enemyBusy = false;
+  let allyText = '';
 
   // Serialize phase refreshes and writes so old exports cannot overwrite a new round.
   function run(task) {
@@ -36,6 +37,7 @@ export function init(context) {
     if (!window.DataStore.set(key, encoded) || window.DataStore.get(key) !== encoded) {
       throw new Error('保存失败：无法写入 Pengu DataStore');
     }
+    if (key === EXPORT_KEY) allyText = text;
   }
 
   async function readJson(path) {
@@ -139,6 +141,19 @@ export function init(context) {
     polling = true;
     try {
       await run(refresh);
+      if (['GameStart', 'InProgress', 'Reconnect'].includes(phase) && allyText &&
+          typeof window.__SONA_GET_ALLY_ANALYSIS__ === 'function') {
+        const startedGeneration = generation;
+        const text = await window.__SONA_GET_ALLY_ANALYSIS__().catch(error => {
+          console.debug('[sona-chat-bridge] 开黑分组暂未就绪', error.message);
+          return null;
+        });
+        await run(async () => {
+          await refresh();
+          if (startedGeneration === generation && ['GameStart', 'InProgress', 'Reconnect'].includes(phase) &&
+              text && text !== allyText) await write(text);
+        });
+      }
       await checkEnemyRequest();
     } catch (error) {
       // Sona reports actionable errors; startup polls may fail until LCU/chat is ready.

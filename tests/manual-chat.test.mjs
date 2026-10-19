@@ -18,6 +18,7 @@ const settle = async () => { for (let i = 0; i < 4; i++) await new Promise(setIm
 function bridgeFixture() {
   let phase = 'ChampSelect', id = 'round-1', text = '', writable = true, poll;
   let request = '', enemyCalls = 0, enemyHandler = async () => '[敌方] 测试玩家：上等马';
+  let allyHandler = async () => null;
   const values = new Map();
   const window = {
     DataStore: {
@@ -25,6 +26,7 @@ function bridgeFixture() {
       get: key => values.get(key)
     },
     __SONA_QUERY_ENEMIES__: async () => { enemyCalls++; return enemyHandler(); },
+    __SONA_GET_ALLY_ANALYSIS__: () => allyHandler(),
     fetch: async path => path.includes('enemy-request.txt') ? { ok: !!request, text: async () => request } :
       { ok: true, json: async () => path.includes('gameflow') ? phase : [{ type: 'championSelect', id }] },
     addEventListener() {}
@@ -40,6 +42,7 @@ function bridgeFixture() {
     enemy: () => { const value = values.get('sona-chat-bridge.enemy.v1'); return value ? Buffer.from(value, 'base64').toString('utf8').slice(15) : ''; },
     request(value) { request = value; }, enemyCalls: () => enemyCalls,
     enemyHandler(fn) { enemyHandler = fn; },
+    allyHandler(fn) { allyHandler = fn; },
     phase(value) { phase = value; }, id(value) { id = value; }, failWrite() { writable = false; } };
 }
 
@@ -104,11 +107,11 @@ test('stale request files do not trigger enemy queries', async () => {
 });
 
 function sonaFixture({ saveFails = false, deferStats = false, lobby: initialLobby = null,
-  conversations = [{ id: 'lobby-room@conference.test', type: 'groupchat' }], game: initialGame = null } = {}) {
+  conversations = [{ id: 'lobby-room@conference.test', type: 'groupchat' }], game: initialGame = null, initialPhase } = {}) {
   const listeners = new Map(), calls = [], errors = [], lobbySessions = [];
   let lobby = initialLobby;
   let game = initialGame;
-  let phase = game ? 'InProgress' : lobby ? 'Lobby' : 'ChampSelect', round = 1, tick, onPhase, queries = 0, enabled = true, release;
+  let phase = initialPhase || (game ? 'InProgress' : lobby ? 'Lobby' : 'ChampSelect'), round = 1, tick, onPhase, queries = 0, enabled = true, release;
   const gate = deferStats ? new Promise(resolve => { release = resolve; }) : Promise.resolve();
   const stats = [
     { floor: 1, puuid: 'p1', gameName: '玩家甲', tagLine: 'CN1', winRate: 60, kdaNum: 4.2, strengthScore: { score: 12.3 } },
@@ -153,6 +156,7 @@ function sonaFixture({ saveFails = false, deferStats = false, lobby: initialLobb
   vm.runInNewContext(program, scope);
   return { calls, errors, lobbySessions, queries: () => queries, release,
     queryEnemy: () => window.__SONA_QUERY_ENEMIES__(),
+    allyAnalysis: () => window.__SONA_GET_ALLY_ANALYSIS__?.(),
     changeGame(value) { game = value; },
     changeLobby(value) { lobby = value; },
     repeatPhase() { onPhase({ data: phase }); },
@@ -304,6 +308,58 @@ test('enemy query refuses unidentified own team and changed game IDs', async () 
   const replacement = testEnemyGame(); replacement.gameData.gameId = 202;
   f.changeGame(replacement); f.release();
   await assert.rejects(pending, /对局已结束或更换/);
+});
+
+test('F7 marks premades separately on each side and preserves missing-history labels', async () => {
+  const game = testEnemyGame();
+  game.gameData.teamOne = [{ puuid: 'self', teamParticipantId: 7 }, { puuid: 'ally', teamParticipantId: 7 }];
+  game.gameData.teamTwo.forEach(player => { player.teamParticipantId = 7; });
+  game.gameData.teamTwo.push({ puuid: 'solo', championId: 33, teamParticipantId: 8 },
+    { puuid: 'hidden', championId: 44, teamParticipantId: 8, nameVisibilityType: 'HIDDEN' });
+  const f = sonaFixture({ game });
+  const text = await f.queryEnemy();
+  assert.match(text, /\[敌方\]\[开黑B队\] 英雄11 玩家甲/);
+  assert.match(text, /\[敌方\]\[开黑B队\] 英雄22 玩家乙：暂无有效战绩/);
+  assert.match(text, /\[敌方\] 英雄33/);
+  assert.match(text, /\[敌方\] 英雄44/);
+});
+
+test('F8 adds premades after game start without querying stats again and clears them next round', async () => {
+  const f = sonaFixture(); await settle();
+  const game = testEnemyGame();
+  game.gameData.teamOne = [{ puuid: 'p2', teamParticipantId: 4 }, { puuid: 'p1', teamParticipantId: 4 }];
+  f.changeGame(game); f.phase('InProgress');
+  const text = await f.allyAnalysis();
+  assert.match(text, /^\[开黑A队\] 玩家甲#CN1/);
+  assert.match(text, /\n\[开黑A队\] 玩家乙 .*暂无有效战绩/);
+  assert.match(text, /\n3楼：暂无有效战绩/);
+  assert.equal(f.queries(), 1);
+  f.phase('Lobby');
+  assert.equal(await f.allyAnalysis(), null);
+  f.disable();
+  assert.equal(f.allyAnalysis(), undefined);
+});
+
+test('F8 select chat and saved export include available premade labels', async () => {
+  const game = testEnemyGame();
+  game.gameData.teamOne = [{ puuid: 'p1', teamParticipantId: 1 }, { puuid: 'p2', teamParticipantId: 1 }];
+  const f = sonaFixture({ game, initialPhase: 'ChampSelect' }); await settle();
+  await f.press({});
+  assert.match(f.calls[0][1], /^\[开黑A队\] 玩家甲/);
+  assert.match(f.calls[1][1], /\[1楼\] 玩家甲\[开黑A队\]/);
+});
+
+test('bridge refreshes ally premades in game and rejects a refresh after the round ends', async () => {
+  const f = bridgeFixture(); await settle();
+  const round = await f.api.begin(); await f.api.save('ally stats', round);
+  f.allyHandler(async () => '[开黑A队] ally stats');
+  f.phase('InProgress'); await f.poll();
+  assert.equal(f.text(), '[开黑A队] ally stats');
+  let release;
+  f.allyHandler(() => new Promise(resolve => { release = resolve; }));
+  const pending = f.poll(); await settle();
+  f.phase('Lobby'); release('stale premades'); await pending;
+  assert.equal(f.text(), '');
 });
 
 test('AHK reads 1.1.6 encrypted datastore, mirrors Unicode text and rejects missing/stale data', t => {

@@ -8,5 +8,6 @@ declare global {
   interface Window {
     __SONA_CHAT_BRIDGE__?: ChatBridge
     __SONA_QUERY_ENEMIES__?: () => Promise<string>
+    __SONA_GET_ALLY_ANALYSIS__?: () => Promise<string | null>
   }
 }
