@@ -4,89 +4,83 @@ on:
   push:
     tags:
       - 'v*'
+      - 'custom-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '版本标签，例如 custom-1.10.0.1；已有标签发布其对应代码，新标签发布所选分支代码'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select release source
+        id: source
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^(custom-|v)[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+            echo '版本标签格式错误，例如 custom-1.10.0.1 或 v1.10.0-custom.1'
+            exit 1
+          fi
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            git checkout --detach "refs/tags/$RELEASE_TAG"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Build plugin
+      - name: Test custom features
+        run: npm run test:custom
+
+      - name: Build complete custom package
+        run: npm run build:custom
+
+      - name: Prepare release ZIP
+        shell: bash
         run: |
-          # CI 环境：将 loaderPath 指向当前目录，让构建产物输出到项目内
-          node -e "
-            const pkg = JSON.parse(require('fs').readFileSync('package.json','utf8'));
-            pkg.config.loaderPath = './';
-            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-          "
-          npx tsc
-          npx vite build
+          cp dist/custom/INSTALL.md dist/custom/plugins/INSTALL.md
+          cd dist/custom/plugins
+          zip -r "../../sona-${RELEASE_TAG}.zip" sona sona-chat-bridge INSTALL.md
+          unzip -t "../../sona-${RELEASE_TAG}.zip"
 
-      - name: Prepare release package
-        run: |
-          mkdir -p release/sona
-          # 复制构建产物
-          cp dist/index.js release/sona/
-          cp dist/index.css release/sona/
-          # 复制 assets（如果存在）
-          if [ -d "dist/assets" ]; then
-            cp -r dist/assets release/sona/
-          fi
-          # 预留用户自定义资源目录，用户可把头像、背景等图片放到这里
-          mkdir -p release/sona/assets
-          cat > release/sona/assets/README.txt <<'EOF'
-          中文：
-          这里是 Sona 的自定义资源目录。
-          你可以把头像、背景、图标等图片放在这个 assets 文件夹里。
-
-          English:
-          This is Sona's custom assets folder.
-          You can put custom avatars, backgrounds, icons, and other images in this assets folder.
-          EOF
-          # 打包
-          cd release
-          zip -r ../sona-${{ github.ref_name }}.zip sona/
-
-      - name: Generate release notes
-        id: notes
-        run: |
-          TAG=${{ github.ref_name }}
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          # 尝试从 CHANGELOG.md 提取当前版本的内容
-          if [ -f CHANGELOG.md ]; then
-            # 提取两个版本标题之间的内容
-            NOTES=$(sed -n "/^## \[${TAG#v}\]/,/^## \[/{ /^## \[${TAG#v}\]/d; /^## \[/d; p; }" CHANGELOG.md)
-            if [ -z "$NOTES" ]; then
-              # 如果没有匹配到，提取第一个版本块
-              NOTES=$(sed -n '/^## \[/,/^## \[/{//!p;}' CHANGELOG.md | head -50)
-            fi
-          fi
-          if [ -z "$NOTES" ]; then
-            NOTES="Release ${TAG}"
-          fi
-          # 写入多行输出
-          echo "notes<<EOF" >> $GITHUB_OUTPUT
-          echo "$NOTES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
+      - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
-          name: Sona ${{ github.ref_name }}
-          body: ${{ steps.notes.outputs.notes }}
-          files: sona-${{ github.ref_name }}.zip
-          draft: false
-          prerelease: false
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ steps.source.outputs.sha }}
+          name: Sona 定制版 ${{ env.RELEASE_TAG }}
+          body: |
+            Sona 定制版，包含聊天桥接、游戏内 AHK 快捷键、大乱斗优先换取及暂停按钮。
+
+            下载附件 ZIP，将 sona 与 sona-chat-bridge 两个文件夹放入 Pengu 的 plugins 目录。
+            使用 Pengu Loader 1.1.6 和 AutoHotkey v2，详细说明见压缩包内 INSTALL.md。
+
+            已执行源码测试、TypeScript 检查和构建。Linux 发布环境跳过 AHK 运行测试，真实客户端与游戏内交互需要另行验证。
+          files: dist/sona-${{ env.RELEASE_TAG }}.zip
+          fail_on_unmatched_files: true
+          draft: true
+          prerelease: true
