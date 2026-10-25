@@ -13,7 +13,8 @@ function mockPauseDom() {
     constructor() { this.children = []; this.attributes = new Map(); this.style = {}; this.events = new Map(); }
     setAttribute(name, value) { this.attributes.set(name, value); }
     addEventListener(name, fn) { this.events.set(name, fn); }
-    querySelector(selector) { return this.children.find(child => child.attributes.has(selector.slice(1, -1))) || null; }
+    querySelector(selector) { return this.children.find(child => child.attributes.has(selector.slice(1, -1))) || this.children.map(child => child.querySelector(selector)).find(Boolean) || null; }
+    appendChild(child) { this.insertBefore(child, null); }
     get firstChild() { return this.children[0] || null; }
     insertBefore(child, before) { this.children.splice(before ? this.children.indexOf(before) : this.children.length, 0, child); child.parent = this; }
     remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
@@ -106,6 +107,7 @@ function fixture({ current = 99, bench = [22], priorities = [11, 22, 33], gameMo
     updatePickable(ids) { emitData('/lol-champ-select/v1/pickable-champion-ids', ids); },
     updateSubset(ids) { emitData('/lol-lobby-team-builder/champ-select/v1/subset-champion-list', ids); },
     deleteSession() { emitData('/lol-champ-select/v1/session', null, 'Delete'); },
+    createSession() { emitData('/lol-champ-select/v1/session', structuredClone(session), 'Create'); },
     async advance(ms) {
       clock += ms;
       const pending = [...timers];
@@ -222,11 +224,13 @@ test('button mounts before exit, pauses pending exchange, resumes and resets nex
   const f = fixture({ disabledGate: gate });
   f.enable(); await settle();
   const button = f.dom.container.children[0];
-  assert.equal(button.textContent, '暂停秒抢');
+  assert.equal(button.children[0].textContent, '自动秒抢');
+  assert.equal(button.attributes.get('role'), 'switch');
+  assert.equal(button.attributes.get('aria-checked'), 'true');
   assert.equal(f.dom.container.children[1].attributes.get('data-sona-quit-button'), 'true');
   button.events.get('click')({ preventDefault() {}, stopPropagation() {} });
-  assert.equal(button.textContent, '恢复秒抢');
-  assert.equal(button.attributes.get('aria-pressed'), 'true');
+  assert.equal(button.children[0].textContent, '自动秒抢');
+  assert.equal(button.attributes.get('aria-checked'), 'false');
   release(); await settle();
   assert.deepEqual(f.swaps, []);
   f.toggle(); await settle();
@@ -238,7 +242,37 @@ test('button mounts before exit, pauses pending exchange, resumes and resets nex
   assert.equal(f.dom.tasks.size, 0);
   f.emit('ChampSelect'); await settle();
   assert.equal(f.paused(), false);
-  assert.equal(f.dom.container.children[0].textContent, '暂停秒抢');
+  assert.equal(f.dom.container.children[0].attributes.get('aria-checked'), 'true');
+  f.disable();
+});
+
+test('paused session deletion resets the switch even without an intervening phase event', async () => {
+  const f = fixture({ autoAdvance: false });
+  f.enable(); await settle();
+  f.toggle(); await settle();
+  assert.equal(f.paused(), true);
+  f.deleteSession();
+  assert.equal(f.paused(), false);
+  assert.equal(f.dom.container.children.length, 1);
+  f.createSession(); await settle();
+  assert.equal(f.dom.container.children[0].attributes.get('aria-checked'), 'true');
+  f.disable();
+  assert.equal(f.listeners(), 0);
+});
+
+test('a reused switch is synchronized after the previous round DOM is reattached', async () => {
+  const f = fixture({ autoAdvance: false });
+  f.enable(); await settle();
+  f.toggle(); await settle();
+  const oldButton = f.dom.container.children[0];
+  oldButton.remove();
+  f.emit('Lobby');
+  f.dom.container.insertBefore(oldButton, f.dom.container.firstChild);
+  assert.equal(oldButton.attributes.get('aria-checked'), 'false');
+  f.emit('ChampSelect'); await settle();
+  assert.equal(oldButton.attributes.get('aria-checked'), 'true');
+  assert.equal(f.dom.container.children.length, 2);
+  f.disable();
 });
 
 test('pausing during normal pick response prevents backup requests', async () => {
@@ -332,12 +366,12 @@ test('an event snapshot is not overwritten by an older GET result', async () => 
   f.deleteSession(); await running;
 });
 
-test('pause immediately removes subscriptions and timers; resume uses a fresh session', async () => {
+test('pause removes bench subscriptions and timers, keeps lifecycle listeners; resume uses a fresh session', async () => {
   const f = fixture({ bench: [], autoAdvance: false });
   f.enable(); await settle();
-  assert.equal(f.listeners(), 5);
+  assert.equal(f.listeners(), 6);
   f.toggle(); await settle();
-  assert.equal(f.listeners(), 1);
+  assert.equal(f.listeners(), 2);
   assert.equal(f.timers.size, 0);
   f.session.benchChampions = [{ championId: 22 }];
   f.updateSession(); await settle();
@@ -349,11 +383,11 @@ test('pause immediately removes subscriptions and timers; resume uses a fresh se
   assert.equal(f.timers.size, 0);
 });
 
-test('leaving selection immediately removes subscriptions and timers', async () => {
+test('leaving selection removes bench subscriptions and timers, keeps lifecycle listeners', async () => {
   const f = fixture({ bench: [], autoAdvance: false });
   f.enable(); await settle();
   f.emit('InProgress'); await settle();
-  assert.equal(f.listeners(), 1);
+  assert.equal(f.listeners(), 2);
   assert.equal(f.timers.size, 0);
   f.disable();
 });

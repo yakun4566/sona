@@ -21,11 +21,18 @@ let sonaAutoPickSelecting = false
 let sonaStopBenchWatch: (() => void) | null = null
 const sonaAutoPickPauseAttr = "data-sona-auto-pick-pause"
 function sonaUpdatePauseButton(button: HTMLElement) {
-  button.textContent = sonaAutoPickPaused ? "恢复秒抢" : "暂停秒抢"
-  button.setAttribute("aria-label", sonaAutoPickPaused ? "恢复本局自动选择英雄" : "暂停本局自动选择英雄")
-  button.setAttribute("aria-pressed", String(sonaAutoPickPaused))
+  button.setAttribute("aria-checked", String(!sonaAutoPickPaused))
   button.title = sonaAutoPickPaused ? "本局已暂停，点击恢复；下一局自动恢复" : "点击暂停本局秒抢，随后可手动选择任意英雄"
-  button.style.color = sonaAutoPickPaused ? "#ffcc66" : "#f0e6d2"
+  const track = button.querySelector<HTMLElement>("[data-sona-auto-pick-track]")
+  const thumb = button.querySelector<HTMLElement>("[data-sona-auto-pick-thumb]")
+  if (track) {
+    track.style.background = sonaAutoPickPaused ? "#252c32" : "#785a28"
+    track.style.borderColor = sonaAutoPickPaused ? "#5b5a56" : "#c8aa6e"
+  }
+  if (thumb) {
+    thumb.style.transform = sonaAutoPickPaused ? "translateX(0)" : "translateX(14px)"
+    thumb.style.background = sonaAutoPickPaused ? "#a09b8c" : "#f0e6d2"
+  }
 }
 function sonaMountPauseButton() {
   if (!sonaAutoPickSelecting || !store.get("autoLockChampion"))
@@ -33,11 +40,29 @@ function sonaMountPauseButton() {
   const container = document.querySelector(".bottom-right-buttons")
   if (!container)
     return false
-  if (container.querySelector(`[${sonaAutoPickPauseAttr}]`))
+  const existing = container.querySelector<HTMLElement>(`[${sonaAutoPickPauseAttr}]`)
+  if (existing) {
+    sonaUpdatePauseButton(existing)
     return true
-  const button = document.createElement("lol-uikit-flat-button")
+  }
+  const button = document.createElement("button")
+  button.type = "button"
   button.setAttribute(sonaAutoPickPauseAttr, "true")
-  button.style.cssText = "min-width:110px;margin-right:10px;flex-shrink:0;"
+  button.setAttribute("role", "switch")
+  button.setAttribute("aria-label", "本局自动秒抢")
+  button.style.cssText = "display:inline-flex;align-items:center;gap:8px;margin-right:10px;padding:6px 8px;flex-shrink:0;border:0;background:transparent;color:#f0e6d2;font:inherit;font-size:12px;cursor:pointer;"
+  const label = document.createElement("span")
+  label.textContent = "自动秒抢"
+  const track = document.createElement("span")
+  track.setAttribute("data-sona-auto-pick-track", "true")
+  track.setAttribute("aria-hidden", "true")
+  track.style.cssText = "display:inline-flex;align-items:center;box-sizing:border-box;width:34px;height:20px;padding:2px;border:1px solid;border-radius:10px;"
+  const thumb = document.createElement("span")
+  thumb.setAttribute("data-sona-auto-pick-thumb", "true")
+  thumb.style.cssText = "display:block;width:14px;height:14px;border-radius:50%;"
+  track.appendChild(thumb)
+  button.appendChild(label)
+  button.appendChild(track)
   sonaUpdatePauseButton(button)
   button.addEventListener("click", event => {
     event.preventDefault()
@@ -240,10 +265,18 @@ export function updateAutoPick(t: boolean, pick: (run: number) => Promise<void>)
         sonaRemovePauseButton()
       }
     }
-    unsubscribeAutoPick = lcu.observe(LcuEventUri.GAMEFLOW_PHASE_CHANGE, event => {
+    const unsubscribePhase = lcu.observe(LcuEventUri.GAMEFLOW_PHASE_CHANGE, event => {
       if (typeof event.data === 'string')
         onPhase(event.data)
     })
+    // Session deletion also ends the round while paused, when no bench watcher is running.
+    const unsubscribeSession = lcu.observe("/lol-champ-select/v1/session", event => {
+      if (event.eventType === "Delete")
+        onPhase("None")
+      else if (event.eventType === "Create")
+        onPhase("ChampSelect")
+    })
+    unsubscribeAutoPick = () => { unsubscribePhase(); unsubscribeSession(); }
     const initialRun = sonaAutoPickRun
     lcu.getGameflowPhase().then(phase => {
       if (unsubscribeAutoPick && initialRun === sonaAutoPickRun)
